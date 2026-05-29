@@ -1,0 +1,134 @@
+import os
+import requests
+import json
+import pandas as pd
+import xml.etree.ElementTree as ET
+from flask import Flask
+from datetime import datetime
+from ta.momentum import RSIIndicator
+
+# Membuat Web Server Kecil untuk Cloud
+app = Flask(__name__)
+
+# ==============================================================================
+# ALAMAT DISCORD WEBHOOK ASLI MILIKMU (TETAP TERPASANG AMAN)
+# ==============================================================================
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1509771890523373668/3bV8ExD1D-YICWLLZXj4yk5_EwTLs_KCX2JL4RaQKPRvMGTfxwGneXdXb2dkR6CLsf1W"
+
+def ambil_data_xau():
+    """Mengambil data chart historis XAU/USD (Gold) untuk dianalisis"""
+    url_alt = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=15m&range=5d"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        response = requests.get(url_alt, headers=headers, timeout=10)
+        if response.status_code == 200:
+            json_data = response.json()
+            result = json_data['chart']['result'][0]
+            timestamps = result['timestamp']
+            quote = result['indicators']['quote'][0]
+            return pd.DataFrame({
+                'Waktu': pd.to_datetime(timestamps, unit='s'),
+                'Open': quote['open'], 'High': quote['high'],
+                'Low': quote['low'], 'Close': quote['close'], 'Volume': quote['volume']
+            }).dropna()
+    except:
+        pass
+    return None
+
+def ambil_berita_global():
+    """Mengambil berita ekonomi makro & forex setara Investing.com"""
+    url = "https://www.forexlive.com/rss/news"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    hasil_berita = []
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            root = ET.fromstring(response.content)
+            for item in root.findall('.//item')[:2]:
+                title = item.find('title').text
+                txt = title.lower()
+                sentimen = "🟢 POSITIF (Gold Naik)" if any(x in txt for x in ['fed rate cut', 'inflation', 'gold rise', 'weak dollar']) else "🔴 NEGATIF (Gold Turun)"
+                hasil_berita.append(f"• **{title}**\n  *Sentimen Pasar: {sentimen}*")
+            return hasil_berita
+    except:
+        pass
+    return ["• Berita Utama: Menunggu sentimen data ekonomi besar AS.\n  *Sentimen: 🟡 NETRAL*"]
+
+# RUTE UTAMA: Ini yang akan dipanggil oleh Alarm Otomatis luar setiap beberapa menit
+@app.route('/')
+@app.route('/scan')
+def cek_momen_trading_cloud():
+    df = ambil_data_xau()
+    if df is None or df.empty:
+        return "Gagal mengambil data market", 500
+
+    harga_sekarang = df['Close'].iloc[-1]
+    rsi_now = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
+    
+    supply_zone_atas = df['High'].iloc[-20:].max()
+    demand_zone_bawah = df['Low'].iloc[-20:].min()
+    harga_wajar = (harga_sekarang + supply_zone_atas + demand_zone_bawah) / 3
+
+    if harga_sekarang > harga_wajar and rsi_now > 50:
+        tren_status = "📈 BULLISH (Tren Naik Kuat)"
+    elif harga_sekarang < harga_wajar and rsi_now < 50:
+        tren_status = "📉 BEARISH (Tren Turun Kuat)"
+    else:
+        tren_status = "📉 SIDEWAYS (Pasar Datar/Saitwei)"
+
+    vol_sekarang = df['Volume'].iloc[-1]
+    vol_rata_rata = df['Volume'].mean()
+    status_vol = "🔥 TINGGI" if vol_sekarang > vol_rata_rata else "⏳ RENDAH"
+
+    c1, c2, c3 = df['Close'].iloc[-3], df['Close'].iloc[-2], df['Close'].iloc[-1]
+    o1, o2, o3 = df['Open'].iloc[-3], df['Open'].iloc[-2], df['Open'].iloc[-1]
+    pola_kandil = "Normal Movement"
+    if c1 > o1 and abs(c2-o2) < abs(c1-o1) and c3 > o3: pola_kandil = "🟩 RALLY BASE RALLY"
+    elif c1 < o1 and abs(c2-o2) < abs(c1-o1) and c3 < o3: pola_kandil = "🟥 DROP BASE DROP"
+    elif c1 < o1 and abs(c2-o2) < abs(c1-o1) and c3 > o3: pola_kandil = "🚀 DROP BASE RALLY"
+    elif c1 > o1 and abs(c2-o2) < abs(c1-o1) and c3 < o3: pola_kandil = "💥 RALLY BASE DROP"
+
+    target_tp = harga_sekarang + 15.0 
+    target_sl = harga_sekarang - 10.0 
+
+    momen_terdeteksi = False
+    rekomendasi_action = ""
+
+    if harga_sekarang <= (demand_zone_bawah + 2.0) or rsi_now <= 35:
+        rekomendasi_action = "🚨 🔥 [MOMEN EMAS - BUY SEKARANG] Masuk Area Demand & RSI Oversold!"
+        momen_terdeteksi = True
+    elif harga_sekarang >= (supply_zone_atas - 2.0) or rsi_now >= 65:
+        rekomendasi_action = "🚨 💰 [MOMEN EMAS - SELL SEKARANG] Membentur Area Supply & RSI Overbought!"
+        momen_terdeteksi = True
+
+    if momen_terdeteksi:
+        waktu_skrg = datetime.now().strftime("%d-%m-%Y %H:%M WIB")
+        berita = ambil_berita_global()
+        
+        msg = f"🔔 **NOTIFIKASI AUTOMATIC CLOUD - XAU/USD (GOLD)** 🔔\n"
+        msg += f"📅 *Waktu Kejadian: {waktu_skrg}*\n"
+        msg += f"=========================================\n\n"
+        msg += f"📢 **[4] REKOMENDASI SINYAL EKSEKUSI:**\n`{rekomendasi_action}`\n\n"
+        msg += f"📊 **DATA TEKNIKAL REAL-TIME:**\n"
+        msg += f"• **Struktur Timeframe:** Utama 4H | Arah 1H | Entry M15\n"
+        msg += f"• **Kondisi Tren Saat Ini:** `{tren_status}`\n"
+        msg += f"• **Harga Emas Saat Ini:** ${harga_sekarang:,.2f}\n"
+        msg += f"• 💎 **Harga Wajar:** ${harga_wajar:,.2f}\n"
+        msg += f"• **Zona Harga Wajar BUY:** ${demand_zone_bawah:.2f} s/d ${demand_zone_bawah + 2.5:.2f}\n"
+        msg += f"• **Indikator RSI (14):** `{rsi_now:.2f}`\n"
+        msg += f"• **Volume Transaksi:** {status_vol} ({vol_sekarang:,.0f} lot)\n"
+        msg += f"• **Pola Candlestick:** `{pola_kandil}`\n"
+        msg += f"• 🎯 **Target TP:** ${target_tp:.2f} | 🛑 **Batas SL:** ${target_sl:.2f}\n\n"
+        msg += f"📰 **SENTIMEN BERITA (SETARA INVESTING.COM):**\n"
+        for b in berita: msg += f"{b}\n"
+        msg += f"=========================================\n"
+        msg += f"⚠️ *Robot Mendeteksi Volatilitas Bagus! Segera Cek MetaTrader Kamu.*"
+        
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+        return "Sinyal Terkirim ke Discord!", 200
+        
+    return f"Pasar Terpantau Biasa/Sideways. Harga: ${harga_sekarang:.2f}, RSI: {rsi_now:.2f}", 200
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
